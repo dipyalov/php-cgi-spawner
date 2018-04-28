@@ -22,6 +22,8 @@ typedef struct _PHPSPWCTX
     HANDLE hFCGIs[MAX_SPAWN_HANDLES];
     unsigned helpers_delay;
     volatile LONG helpers_running;
+
+	HANDLE hKillJob;
 } PHPSPWCTX;
 
 static PHPSPWCTX ctx;
@@ -55,12 +57,17 @@ static char spawn_fcgi( HANDLE * hFCGI, BOOL is_perm )
             SetEnvironmentVariableA( "PHP_FCGI_MAX_REQUESTS", val );
         }
 
-        if( !CreateProcessA( NULL, ctx.cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
-                             NULL, NULL, &ctx.si, &ctx.pi ) )
+        if( !CreateProcessA( NULL, ctx.cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &ctx.si, &ctx.pi ) )
         {
             isok = 0;
             break;
         }
+
+		if (ctx.hKillJob)
+		{
+			AssignProcessToJobObject(ctx.hKillJob, ctx.pi.hProcess);
+		}
+		ResumeThread(ctx.pi.hThread);
 
         CloseHandle( ctx.pi.hThread );
         *hFCGI = ctx.pi.hProcess;
@@ -313,7 +320,7 @@ void __cdecl WinMainCRTStartup( void )
     char * argv[ARGS_MAX];
     argv[4] = NULL;
 
-    for( ;; )
+    do
     {
         BOOL is_helpers = FALSE;
 
@@ -343,6 +350,21 @@ void __cdecl WinMainCRTStartup( void )
 
         if( ( ctx.fcgis < 1 && !is_helpers ) || ctx.fcgis > MAX_SPAWN_HANDLES )
             break;
+
+
+		//JOB
+		ctx.hKillJob = CreateJobObject(NULL, NULL);
+		if (ctx.hKillJob)
+		{
+			JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = { 0 };
+			// Configure all child processes associated with the job to terminate when the
+			jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+			if (!SetInformationJobObject(ctx.hKillJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli)))
+			{
+				CloseHandle(ctx.hKillJob);
+				ctx.hKillJob = NULL;
+			}
+		}
 
         // SOCKET
         {
@@ -404,7 +426,8 @@ void __cdecl WinMainCRTStartup( void )
 
         perma_thread( is_helpers );
         break;
-    }
+	} 
+	while (FALSE);
 
     ExitProcess( 0 );
 }
